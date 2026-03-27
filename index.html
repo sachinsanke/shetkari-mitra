@@ -149,8 +149,8 @@ body{
     </div>
   </div>
   <div class="pills-row">
-    <button class="pill" onclick="q(0)">💰 मंडी भाव</button>
-    <button class="pill" onclick="q(1)">🌦️ हवामान</button>
+    <button class="pill" onclick="fetchMandi()">💰 मंडी भाव</button>
+    <button class="pill" onclick="fetchWeather()">🌦️ हवामान</button>
     <button class="pill" onclick="q(2)">🏛️ PM योजना</button>
     <button class="pill" onclick="q(3)">📈 विकायचे का?</button>
     <button class="pill" onclick="q(4)">🐛 रोग/किड</button>
@@ -176,7 +176,8 @@ body{
   </div>
 
   <div class="cards">
-    <div class="fc" onclick="q(0)"><div class="fc-icon">💰</div><div class="fc-title">मंडी भाव</div><div class="fc-desc">कापूस, सोयाबीन, कांदा, ऊस — आजचे दर</div></div>
+    <div class="fc" onclick="fetchMandi()"><div class="fc-icon">💰</div><div class="fc-title">मंडी भाव</div><div class="fc-desc">कापूस, सोयाबीन, कांदा, ऊस — आजचे दर</div></div>
+    <div class="fc" onclick="fetchWeather()"><div class="fc-icon">🌦️</div><div class="fc-title">हवामान</div><div class="fc-desc">आजचे हवामान व शेती सल्ला</div></div>
     <div class="fc" onclick="q(2)"><div class="fc-icon">🏛️</div><div class="fc-title">PM योजना</div><div class="fc-desc">PM-KISAN, विमा, KCC — अर्ज कसा करायचा</div></div>
     <div class="fc" onclick="q(4)"><div class="fc-icon">🐛</div><div class="fc-title">रोग निदान</div><div class="fc-desc">पिकांचे रोग ओळखा, उपाय मिळवा</div></div>
     <div class="fc" onclick="q(3)"><div class="fc-icon">📈</div><div class="fc-title">विक्री सल्ला</div><div class="fc-desc">आत्ता विका की थांबा? AI सल्ला</div></div>
@@ -275,7 +276,13 @@ const QQ={
       'My crop was damaged. How do I file a crop insurance claim? Whom to contact?']
 };
 
-function q(i){ document.getElementById('txt').value=QQ[lang][i]; send(); }
+// q(0) and q(1) now handled by fetchMandi/fetchWeather; others go to AI directly
+function q(i){
+  if(i===0){ fetchMandi(); return; }
+  if(i===1){ fetchWeather(); return; }
+  document.getElementById('txt').value=QQ[lang][i];
+  send();
+}
 
 // ── SYSTEM PROMPT ──
 function sysPrompt(){
@@ -298,7 +305,8 @@ EXPERTISE — Answer these with confidence:
    Tur Dal: ₹6,500–9,000 | Wheat: ₹2,100–2,600 | Sugarcane: ₹3,200–3,600/tonne
    Grapes: ₹40–120/kg | Pomegranate: ₹80–200/kg | Jowar: ₹2,800–3,500 | Turmeric: ₹7,000–18,000
    Key mandis: Pune APMC, Nashik, Lasalgaon, Aurangabad, Nagpur, Latur, Mumbai APMC, Solapur
-   Always say "typical seasonal range" not live data. Recommend checking AgMarkNet app.
+   If LIVE MANDI DATA is provided in the message, use those exact numbers and say they are live/today's rates.
+   Otherwise say "typical seasonal range" and recommend checking AgMarkNet app.
 
 2. GOVERNMENT SCHEMES (know everything):
    PM-KISAN: ₹6,000/year, 3 installments. All farmers with land. Apply: pmkisan.gov.in or CSC. Need: Aadhaar+bank+land records.
@@ -315,7 +323,8 @@ EXPERTISE — Answer these with confidence:
 4. PEST & DISEASE: Identify from description. Give 1 organic + 1 chemical remedy, dosage, available at local agri shop.
    Common: Cotton bollworm, Pink bollworm, Whitefly, Red mite | Soybean: Yellow mosaic, Girdle beetle | Onion: Thrips, Purple blotch
 
-5. WEATHER & SEASONAL: Kharif sowing (June-Oct): Cotton, Soybean, Tur, Jowar, Onion. Rabi (Oct-March): Wheat, Chickpea, Onion rabi.
+5. WEATHER & SEASONAL: If LIVE WEATHER DATA is provided, use those exact numbers and give specific farming advice based on that data.
+   Kharif sowing (June-Oct): Cotton, Soybean, Tur, Jowar, Onion. Rabi (Oct-March): Wheat, Chickpea, Onion rabi.
 
 6. INSURANCE CLAIMS: Report within 72 hours. Call insurance company helpline. Contact local agriculture officer. Keep photos of damage.
 
@@ -368,26 +377,18 @@ async function send(){
   showTyping();
 
   try{
-    // ✅ Calls YOUR Netlify function — API key is hidden on the server
     const res=await fetch('/api/chat',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        messages:history,
-        systemPrompt:sysPrompt()
-      })
+      body:JSON.stringify({messages:history,systemPrompt:sysPrompt()})
     });
-
     const data=await res.json();
     killTyping();
-
     if(data.error) throw new Error(data.error);
-
     const reply=data.reply;
     history.push({role:'model',parts:[{text:reply}]});
     if(history.length>20) history=history.slice(-16);
     addMsg('bot',fmt(reply));
-
   }catch(e){
     killTyping();
     const em=lang==='mr'
@@ -398,12 +399,138 @@ async function send(){
     addMsg('bot',em,true);
     history.pop();
   }
-
   loading=false;document.getElementById('snd').disabled=false;
 }
 
 function onKey(e){ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();} }
 function resize(el){ el.style.height='auto';el.style.height=Math.min(el.scrollHeight,90)+'px'; }
+
+// ── MANDI PRICES ──
+async function fetchMandi(commodity){
+  if(loading) return;
+  const question = lang==='mr' ? 'आजचे मंडी भाव काय आहेत? कुठल्या मंडीत चांगले भाव मिळतील?' :
+                   lang==='hi' ? 'आज के मंडी भाव क्या हैं?' :
+                   "What are today's mandi prices?";
+
+  loading=true;
+  document.getElementById('snd').disabled=true;
+  addMsg('user', question);
+  showTyping();
+
+  try{
+    // Fetch live mandi data
+    const mandiRes = await fetch('/.netlify/functions/mandi',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ commodity: commodity||'Onion', state:'Maharashtra' })
+    });
+    const mandiData = await mandiRes.json();
+    const prices = mandiData.prices || [];
+
+    // Build live price context for AI
+    let priceContext = '';
+    if(prices.length > 0){
+      priceContext = '\n\nLIVE MANDI DATA (today from data.gov.in):\n' +
+        prices.slice(0,8).map(p=>
+          `${p.commodity||p.Commodity} @ ${p.market||p.Market}: Min ₹${p.min_price||p.Min_Price}, Max ₹${p.max_price||p.Max_Price}, Modal ₹${p.modal_price||p.Modal_Price} (${p.arrival_date||p.Arrival_Date||'today'})`
+        ).join('\n');
+      priceContext += '\n\nUse these EXACT live prices in your answer. Tell the farmer which mandi has the best rate.';
+    } else {
+      priceContext = '\n\n(Live mandi data unavailable right now. Give typical seasonal ranges and advise farmer to check AgMarkNet app.)';
+    }
+
+    const userMsg = question + priceContext;
+    history.push({role:'user', parts:[{text:userMsg}]});
+
+    const res = await fetch('/api/chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({messages:history, systemPrompt:sysPrompt()})
+    });
+    const data = await res.json();
+    killTyping();
+    if(data.error) throw new Error(data.error);
+
+    history.push({role:'model', parts:[{text:data.reply}]});
+    if(history.length>20) history=history.slice(-16);
+    addMsg('bot', fmt(data.reply));
+
+  }catch(e){
+    killTyping();
+    const em = lang==='mr' ? '⚠️ मंडी भाव मिळवताना चूक झाली. पुन्हा प्रयत्न करा.' :
+               lang==='hi' ? '⚠️ मंडी भाव लाने में गलती हुई। फिर कोशिश करें।' :
+               '⚠️ Could not fetch mandi prices. Please try again.';
+    addMsg('bot', em, true);
+    history.pop();
+  }
+
+  loading=false;
+  document.getElementById('snd').disabled=false;
+}
+
+// ── WEATHER ──
+async function fetchWeather(city){
+  if(loading) return;
+  const question = lang==='mr' ? 'आजचे हवामान कसे आहे? शेतीसाठी काय करावे?' :
+                   lang==='hi' ? 'आज का मौसम कैसा है? खेती के लिए क्या करें?' :
+                   "What is today's weather? What should I do for farming?";
+
+  loading=true;
+  document.getElementById('snd').disabled=true;
+  addMsg('user', question);
+  showTyping();
+
+  try{
+    // Fetch live weather
+    const wxRes = await fetch('/.netlify/functions/weather',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ city: city||'Aurangabad,IN' })
+    });
+    const wxData = await wxRes.json();
+    const wx = wxData.weather;
+
+    // Build weather context for AI
+    let wxContext = '';
+    if(wx && wx.temp !== undefined){
+      wxContext = `\n\nLIVE WEATHER DATA for ${wx.city} (right now):
+Temperature: ${wx.temp}°C (feels like ${wx.feels_like}°C)
+Humidity: ${wx.humidity}%
+Condition: ${wx.description}
+Wind Speed: ${wx.wind} m/s
+Use these EXACT numbers. Give specific farming advice based on this weather — what to do today, what to avoid.`;
+    } else {
+      wxContext = '\n\n(Live weather data unavailable. Give general seasonal farming advice for Maharashtra.)';
+    }
+
+    const userMsg = question + wxContext;
+    history.push({role:'user', parts:[{text:userMsg}]});
+
+    const res = await fetch('/api/chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({messages:history, systemPrompt:sysPrompt()})
+    });
+    const data = await res.json();
+    killTyping();
+    if(data.error) throw new Error(data.error);
+
+    history.push({role:'model', parts:[{text:data.reply}]});
+    if(history.length>20) history=history.slice(-16);
+    addMsg('bot', fmt(data.reply));
+
+  }catch(e){
+    killTyping();
+    const em = lang==='mr' ? '⚠️ हवामान माहिती मिळवताना चूक झाली. पुन्हा प्रयत्न करा.' :
+               lang==='hi' ? '⚠️ मौसम जानकारी लाने में गलती हुई। फिर कोशिश करें।' :
+               '⚠️ Could not fetch weather data. Please try again.';
+    addMsg('bot', em, true);
+    history.pop();
+  }
+
+  loading=false;
+  document.getElementById('snd').disabled=false;
+}
 
 // ── VOICE ──
 function toggleMic(){
